@@ -14,29 +14,72 @@
  * limitations under the License.
  */
 
-const utils = module.exports = {
+// TODO (@jackfranklin): convert to TS and enable type checking.
+
+// @ts-nocheck
+const fs = require('fs');
+const path = require('path');
+const expect = require('expect');
+const GoldenUtils = require('./golden-utils');
+const PROJECT_ROOT = fs.existsSync(path.join(__dirname, '..', 'package.json'))
+  ? path.join(__dirname, '..')
+  : path.join(__dirname, '..', '..');
+
+const utils = (module.exports = {
+  extendExpectWithToBeGolden: function (goldenDir, outputDir) {
+    expect.extend({
+      toBeGolden: (testScreenshot, goldenFilePath) => {
+        const result = GoldenUtils.compare(
+          goldenDir,
+          outputDir,
+          testScreenshot,
+          goldenFilePath
+        );
+
+        return {
+          message: () => result.message,
+          pass: result.pass,
+        };
+      },
+    });
+  },
+
+  /**
+   * @returns {string}
+   */
+  projectRoot: function () {
+    return PROJECT_ROOT;
+  },
+
   /**
    * @param {!Page} page
    * @param {string} frameId
    * @param {string} url
+   * @returns {!Frame}
    */
-  attachFrame: async function(page, frameId, url) {
-    await page.evaluate(attachFrame, frameId, url);
+  attachFrame: async function (page, frameId, url) {
+    const handle = await page.evaluateHandle(attachFrame, frameId, url);
+    return await handle.asElement().contentFrame();
 
-    function attachFrame(frameId, url) {
+    async function attachFrame(frameId, url) {
       const frame = document.createElement('iframe');
       frame.src = url;
       frame.id = frameId;
       document.body.appendChild(frame);
-      return new Promise(x => frame.onload = x);
+      await new Promise((x) => (frame.onload = x));
+      return frame;
     }
+  },
+
+  isFavicon: function (request) {
+    return request.url().includes('favicon.ico');
   },
 
   /**
    * @param {!Page} page
    * @param {string} frameId
    */
-  detachFrame: async function(page, frameId) {
+  detachFrame: async function (page, frameId) {
     await page.evaluate(detachFrame, frameId);
 
     function detachFrame(frameId) {
@@ -50,80 +93,43 @@ const utils = module.exports = {
    * @param {string} frameId
    * @param {string} url
    */
-  navigateFrame: async function(page, frameId, url) {
+  navigateFrame: async function (page, frameId, url) {
     await page.evaluate(navigateFrame, frameId, url);
 
     function navigateFrame(frameId, url) {
       const frame = document.getElementById(frameId);
       frame.src = url;
-      return new Promise(x => frame.onload = x);
+      return new Promise((x) => (frame.onload = x));
     }
   },
 
   /**
    * @param {!Frame} frame
    * @param {string=} indentation
-   * @return {string}
+   * @returns {Array<string>}
    */
-  dumpFrames: function(frame, indentation) {
+  dumpFrames: function (frame, indentation) {
     indentation = indentation || '';
-    let result = indentation + frame.url().replace(/:\d{4}\//, ':<PORT>/');
+    let description = frame.url().replace(/:\d{4}\//, ':<PORT>/');
+    if (frame.name()) description += ' (' + frame.name() + ')';
+    const result = [indentation + description];
     for (const child of frame.childFrames())
-      result += '\n' + utils.dumpFrames(child, '    ' + indentation);
+      result.push(...utils.dumpFrames(child, '    ' + indentation));
     return result;
   },
 
   /**
    * @param {!EventEmitter} emitter
    * @param {string} eventName
-   * @param {number=} eventCount
-   * @return {!Promise<!Object>}
+   * @returns {!Promise<!Object>}
    */
-  waitForEvents: function(emitter, eventName, eventCount = 1) {
-    let fulfill;
-    const promise = new Promise(x => fulfill = x);
-    emitter.on(eventName, onEvent);
-    return promise;
-
-    function onEvent(event) {
-      --eventCount;
-      if (eventCount)
-        return;
-      emitter.removeListener(eventName, onEvent);
-      fulfill(event);
-    }
-  },
-
-  /**
-  * @param {!Buffer} pdfBuffer
-  * @return {!Promise<!Array<!Object>>}
-  */
-  getPDFPages: async function(pdfBuffer) {
-    const PDFJS = require('pdfjs-dist');
-    PDFJS.disableWorker = true;
-    const data = new Uint8Array(pdfBuffer);
-    const doc = await PDFJS.getDocument(data);
-    const pages = [];
-    for (let i = 0; i < doc.numPages; ++i) {
-      const page = await doc.getPage(i + 1);
-      const viewport = page.getViewport(1);
-      // Viewport width and height is in PDF points, which is
-      // 1/72 of an inch.
-      pages.push({
-        width: viewport.width / 72,
-        height: viewport.height / 72,
+  waitEvent: function (emitter, eventName, predicate = () => true) {
+    return new Promise((fulfill) => {
+      emitter.on(eventName, function listener(event) {
+        if (!predicate(event)) return;
+        emitter.removeListener(eventName, listener);
+        fulfill(event);
       });
-      page.cleanup();
-    }
-    doc.cleanup();
-    return pages;
+    });
   },
-
-  /**
-   * @param {number} px
-   * @return {number}
-   */
-  cssPixelsToInches: function(px) {
-    return px / 96;
-  },
-};
+});
